@@ -758,16 +758,21 @@ route's media type.
 - A trailing slash is dropped from a path (`/a/` is published as `/a`), except under
   `StrictRouting`, where `/a` and `/a/` are different routes and a pattern that ends in
   `/` keeps it. A variant of such a pattern that drops an optional segment (`/a/:id?/`
-  without `:id`) would end in `//`, which no request reaches, so it is left out.
+  without `:id`) would end in `//`, which no request reaches, so it is left out. The
+  routes of a mounted sub-app follow the parent app's `StrictRouting`, as they do when
+  served.
 - A literal `{` or `}` in a route is published percent-encoded (`%7B`, `%7D`), because
   OpenAPI reads braces as template expressions. Fiber matches such a route only with
   `UnescapePath` enabled, where both forms reach it.
 - A header parameter named `Accept`, `Content-Type` or `Authorization` is left out, as
   OpenAPI says to ignore those definitions; the headers are described by the media types
   and security schemes instead. A query parameter with one of those names is kept.
-- In 3.2 a `querystring` parameter describes the whole query string, so the `query`
-  parameters of the same operation are dropped when one is present, as the specification
-  forbids using both. Before 3.2 the `querystring` parameter is dropped instead.
+- In 3.2 a `querystring` parameter describes the whole query string, so every `query`
+  parameter of the same operation is dropped when one is present, whether you declared
+  it, a parameter model produced it or middleware added it, as the specification forbids
+  using both. Before 3.2 the `querystring` parameter is dropped instead. Nothing warns
+  when a parameter is dropped, so declare either a `querystring` parameter or `query`
+  parameters on a route, not both.
 - Routes with several optional parameters (e.g. `/files/:dir?/:name?`) emit one
   templated path per hierarchy level (`/files`, `/files/{dir}`,
   `/files/{dir}/{name}`): the router always binds the first parameter, and the

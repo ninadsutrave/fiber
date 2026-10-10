@@ -154,3 +154,67 @@ func Test_ValueCopiesFanOutCyclesOnce(t *testing.T) {
 		require.True(t, isMap)
 	})
 }
+
+func Test_ValueCopiesDiamondsInLinearTime(t *testing.T) {
+	t.Parallel()
+
+	// Each level holds the same child twice: copied once per path, this is 2^40 copies.
+	var level any = map[string]any{"leaf": "x"}
+	for range 40 {
+		level = map[string]any{"l": level, "r": level}
+	}
+	runsQuickly(t, func() {
+		got, ok := Value(level).(map[string]any)
+		require.True(t, ok)
+		require.Contains(t, got, "l")
+	})
+
+	var slices any = []any{"x"}
+	for range 40 {
+		slices = []any{slices, slices}
+	}
+	runsQuickly(t, func() {
+		got, ok := Value(slices).([]any)
+		require.True(t, ok)
+		require.Len(t, got, 2)
+	})
+}
+
+func Test_ValueCopiesDeepChainsInsteadOfSharingThem(t *testing.T) {
+	t.Parallel()
+
+	root := map[string]any{}
+	node := root
+	for range 150 {
+		next := map[string]any{}
+		node["next"] = next
+		node = next
+	}
+	node["end"] = "x"
+
+	got := Map(root)
+	tail := got
+	for range 150 {
+		tail = tail["next"].(map[string]any) //nolint:errcheck,forcetypeassert // built just above
+	}
+	node["end"] = "changed"
+	require.Equal(t, "x", tail["end"], "the copy is independent at any depth the chain reaches")
+}
+
+func Test_ValueKeepsSharingOnceMemoizing(t *testing.T) {
+	t.Parallel()
+
+	// Past memoAfter containers a shared child is copied once, so the copy shares it too.
+	shared := map[string]any{"k": "v"}
+	list := make([]any, 0, memoAfter+10)
+	for range memoAfter + 10 {
+		list = append(list, map[string]any{"s": shared})
+	}
+	got, ok := Value(list).([]any)
+	require.True(t, ok)
+	first := got[0].(map[string]any)["s"].(map[string]any)         //nolint:errcheck,forcetypeassert // built just above
+	last := got[len(got)-1].(map[string]any)["s"].(map[string]any) //nolint:errcheck,forcetypeassert // built just above
+	shared["k"] = "changed"
+	require.Equal(t, "v", first["k"])
+	require.Equal(t, "v", last["k"])
+}

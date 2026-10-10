@@ -41,12 +41,6 @@ var openAPIOperationMethods = map[string]struct{}{
 	fiber.MethodQuery:   {},
 }
 
-var openAPIVersionRank = map[string]int{
-	"3.0": 0,
-	"3.1": 1,
-	"3.2": 2,
-}
-
 type openAPISpec struct {
 	Paths             map[string]map[string]operation `json:"paths"`
 	Components        map[string]any                  `json:"components,omitempty"`
@@ -264,34 +258,43 @@ func uniqueOperationID(id string, used map[string]struct{}) string {
 	}
 }
 
-// versionRank orders the supported minor versions; 3.0.3 ranks with 3.0.0.
-func versionRank(version string) int {
-	if len(version) < len("3.0") {
-		return 0
+// parseVersion reads the minor version of a 3.0.x, 3.1.x or 3.2.x release (0, 1 or 2).
+func parseVersion(version string) (minor int, ok bool) { //nolint:nonamedreturns // an int and a bool read better named
+	major, rest, found := strings.Cut(version, ".")
+	if !found || major != "3" {
+		return 0, false
 	}
-	return openAPIVersionRank[version[:len("3.0")]]
-}
-
-func versionAtLeast(version, minimum string) bool {
-	return versionRank(version) >= versionRank(minimum)
+	minorText, patch, found := strings.Cut(rest, ".")
+	if !found || len(minorText) != 1 || minorText[0] > '2' || !isASCIIDigit(minorText[0]) || patch == "" {
+		return 0, false
+	}
+	for i := 0; i < len(patch); i++ {
+		if !isASCIIDigit(patch[i]) {
+			return 0, false
+		}
+	}
+	return int(minorText[0] - '0'), true
 }
 
 // supportedVersion reports whether version is a 3.0.x, 3.1.x or 3.2.x release.
 func supportedVersion(version string) bool {
-	major, patch, ok := strings.Cut(version, ".")
-	if !ok || major != "3" {
+	_, ok := parseVersion(version)
+	return ok
+}
+
+// versionAtLeast reports whether version is the same minor release as minimum or a later one,
+// so 3.0.3 counts as 3.0.0. Both must be supported versions; an unsupported one ranks lowest.
+func versionAtLeast(version, minimum string) bool {
+	have, haveOK := parseVersion(version)
+	want, wantOK := parseVersion(minimum)
+	switch {
+	case !wantOK:
+		return true
+	case !haveOK:
 		return false
+	default:
+		return have >= want
 	}
-	minor, patchDigits, ok := strings.Cut(patch, ".")
-	if !ok || (minor != "0" && minor != "1" && minor != "2") || patchDigits == "" {
-		return false
-	}
-	for i := 0; i < len(patchDigits); i++ {
-		if !isASCIIDigit(patchDigits[i]) {
-			return false
-		}
-	}
-	return true
 }
 
 // specEnv carries what generation reads from the app rather than from Config.

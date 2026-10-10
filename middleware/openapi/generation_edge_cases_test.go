@@ -369,3 +369,43 @@ func Test_OpenAPI_SpecDoesNotAliasRouteSecurity(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, []any{map[string]any{"oauth": []any{"read"}}}, security)
 }
+
+func Test_OpenAPI_MountedRoutesFollowTheParentsStrictRouting(t *testing.T) {
+	t.Parallel()
+
+	// A mounted route is served under the parent's routing settings, so the parent's
+	// StrictRouting decides whether the trailing slash is part of the published path.
+	for _, tt := range []struct {
+		want                    string
+		parentStrict, subStrict bool
+	}{
+		{parentStrict: false, subStrict: true, want: "/m/x"},
+		{parentStrict: true, subStrict: false, want: "/m/x/"},
+		{parentStrict: true, subStrict: true, want: "/m/x/"},
+		{parentStrict: false, subStrict: false, want: "/m/x"},
+	} {
+		parent := fiber.New(fiber.Config{StrictRouting: tt.parentStrict})
+		sub := fiber.New(fiber.Config{StrictRouting: tt.subStrict})
+		sub.Get("/x/", listUsers)
+		parent.Use("/m", sub)
+		require.Contains(t, requireMap(t, modelSpec(t, parent)["paths"]), tt.want, "%+v", tt)
+	}
+}
+
+func Test_OpenAPI_VersionHelpers(t *testing.T) {
+	t.Parallel()
+
+	for version, want := range map[string]int{"3.0.0": 0, "3.0.3": 0, "3.1.10": 1, "3.1.01": 1, "3.2.0": 2} {
+		minor, ok := parseVersion(version)
+		require.True(t, ok, version)
+		require.Equal(t, want, minor, version)
+	}
+	for _, version := range []string{"", "3", "3.1", "3.1.", "03.1.0", " 3.1.0", "3.1.0-rc1", "3.3.0", "4.0.0", "3.10.0"} {
+		_, ok := parseVersion(version)
+		require.False(t, ok, version)
+	}
+	require.True(t, versionAtLeast("3.2.4", versionOpenAPI32))
+	require.True(t, versionAtLeast("3.1.1", versionOpenAPI31))
+	require.False(t, versionAtLeast("3.0.3", versionOpenAPI31))
+	require.False(t, versionAtLeast("garbage", versionOpenAPI30))
+}

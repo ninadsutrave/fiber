@@ -1,6 +1,7 @@
 // Package deepcopy clones the loosely typed values OpenAPI metadata is made of
-// (maps, slices and security requirements) so a copy shares no container with
-// its source.
+// (maps, slices, pointers and structs) so a copy shares no map, slice or
+// pointer with its source, with these exceptions: map keys, the unexported
+// fields of a struct, and anything nested deeper than maxDepth are shared.
 package deepcopy
 
 import (
@@ -8,18 +9,29 @@ import (
 	"slices"
 )
 
-// maxDepth bounds the recursion: a very deep value would otherwise overflow the
-// stack. Past it a value is shared rather than copied.
-const maxDepth = 100
+const (
+	// maxDepth bounds the recursion so a very deep value cannot overflow the
+	// stack. Cycles are handled separately, so only an absurdly deep chain
+	// reaches it; past it a value is shared rather than copied.
+	maxDepth = 10000
 
-// copier clones values while tracking the containers it is in the middle of
-// copying. A pointer, map or slice met again while still being copied is a
-// cycle: the copy of it so far is reused, so a value that points back to itself,
-// however many times, is copied once and its copy points back to the copy. Only
-// the current path is tracked, which keeps the common acyclic copy free of any
-// bookkeeping allocation.
+	// memoAfter is how many containers are copied before every container is
+	// remembered. A small value is copied without the bookkeeping; a large
+	// one with shared children (a diamond of maps, which would otherwise be
+	// copied once per path to it) is copied once per container from then on.
+	memoAfter = 1024
+)
+
+// copier clones values. A pointer, map or slice met again while it is still
+// being copied is a cycle: the copy under way is reused, so a value that points
+// back to itself, however many times, is copied once and its copy points back
+// to the copy. After memoAfter containers every one copied is remembered, so a
+// value that shares a child many times stops being copied once per reference;
+// below that threshold a shared child may be copied more than once.
 type copier struct {
-	path []frame
+	memo  map[visit]reflect.Value
+	path  []frame
+	nodes int
 }
 
 // frame is a container being copied and the copy made of it.
@@ -69,19 +81,31 @@ func Security(src []map[string][]string) []map[string][]string {
 
 // enter notes that v is being copied into copied; call leave when it is done.
 func (c *copier) enter(v, copied reflect.Value) {
-	c.path = append(c.path, frame{key: visitOf(v), copied: copied})
+	key := visitOf(v)
+	c.path = append(c.path, frame{key: key, copied: copied})
+	c.nodes++
+	if c.memo != nil {
+		c.memo[key] = copied
+	} else if c.nodes > memoAfter {
+		c.memo = make(map[visit]reflect.Value)
+		c.memo[key] = copied
+	}
 }
 
 func (c *copier) leave() {
 	c.path = c.path[:len(c.path)-1]
 }
 
-// recall returns the copy under way of v, if v is on the current path.
+// recall returns the copy of v when it is under way or, once memoizing, finished.
 func (c *copier) recall(v reflect.Value) (reflect.Value, bool) {
-	if len(c.path) == 0 {
+	if len(c.path) == 0 && c.memo == nil {
 		return reflect.Value{}, false
 	}
 	key := visitOf(v)
+	if c.memo != nil {
+		copied, ok := c.memo[key]
+		return copied, ok
+	}
 	for _, f := range slices.Backward(c.path) {
 		if f.key == key {
 			return f.copied, true
@@ -91,11 +115,11 @@ func (c *copier) recall(v reflect.Value) (reflect.Value, bool) {
 }
 
 func visitOf(v reflect.Value) visit {
-	n := 0
+	size := 0
 	if v.Kind() == reflect.Slice {
-		n = v.Len()
+		size = v.Len()
 	}
-	return visit{typ: v.Type(), ptr: v.Pointer(), size: n}
+	return visit{typ: v.Type(), ptr: v.Pointer(), size: size}
 }
 
 func (c *copier) mapValue(src map[string]any, depth int) map[string]any {
@@ -171,25 +195,7 @@ func (c *copier) copyValue(v reflect.Value, depth int) reflect.Value {
 		c.leave()
 		return out
 	case reflect.Slice:
-		if v.IsNil() {
-			return v
-		}
-		if v.Len() > 0 {
-			if copied, ok := c.recall(v); ok {
-				return copied
-			}
-		}
-		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
-		if v.Len() > 0 {
-			c.enter(v, out)
-		}
-		for i := range v.Len() {
-			out.Index(i).Set(c.copyValue(v.Index(i), depth+1))
-		}
-		if v.Len() > 0 {
-			c.leave()
-		}
-		return out
+		return c.copySlice(v, depth)
 	case reflect.Array:
 		out := reflect.New(v.Type()).Elem()
 		out.Set(v)
@@ -209,4 +215,24 @@ func (c *copier) copyValue(v reflect.Value, depth int) reflect.Value {
 	default:
 		return v
 	}
+}
+
+// copySlice copies a slice. An empty slice has no address to track, so it is copied without bookkeeping.
+func (c *copier) copySlice(v reflect.Value, depth int) reflect.Value {
+	if v.IsNil() {
+		return v
+	}
+	if v.Len() == 0 {
+		return reflect.MakeSlice(v.Type(), 0, 0)
+	}
+	if copied, ok := c.recall(v); ok {
+		return copied
+	}
+	out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+	c.enter(v, out)
+	for i := range v.Len() {
+		out.Index(i).Set(c.copyValue(v.Index(i), depth+1))
+	}
+	c.leave()
+	return out
 }

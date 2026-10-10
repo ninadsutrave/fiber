@@ -11,26 +11,27 @@ type parameterKey struct {
 	name string
 }
 
-// dropQuerystringParameters removes parameters in the OpenAPI 3.2-only
-// "querystring" location.
-func dropQuerystringParameters(extras []fiber.RouteParameter) []fiber.RouteParameter {
-	isQuerystring := func(in fiber.ParamLocation) bool {
-		return in.Normalize() == fiber.ParamInQuerystring
-	}
+// filterParams returns extras without the parameters whose location drop reports true. It returns
+// extras itself when nothing is dropped.
+func filterParams(extras []fiber.RouteParameter, drop func(in fiber.ParamLocation) bool) []fiber.RouteParameter {
 	for i := range extras {
-		if !isQuerystring(extras[i].In) {
+		if !drop(extras[i].In.Normalize()) {
 			continue
 		}
 		filtered := append([]fiber.RouteParameter(nil), extras[:i]...)
 		for j := i + 1; j < len(extras); j++ {
-			if isQuerystring(extras[j].In) {
-				continue
+			if !drop(extras[j].In.Normalize()) {
+				filtered = append(filtered, extras[j])
 			}
-			filtered = append(filtered, extras[j])
 		}
 		return filtered
 	}
 	return extras
+}
+
+// dropQuerystringParameters removes parameters in the OpenAPI 3.2-only "querystring" location.
+func dropQuerystringParameters(extras []fiber.RouteParameter) []fiber.RouteParameter {
+	return filterParams(extras, func(in fiber.ParamLocation) bool { return in == fiber.ParamInQuerystring })
 }
 
 // isReservedHeader reports whether OpenAPI says to ignore a header parameter of this name.
@@ -41,8 +42,9 @@ func isReservedHeader(name string) bool {
 		utils.EqualFold(name, fiber.HeaderAuthorization)
 }
 
-// dropQueryAlongsideQuerystring removes the "query" parameters when a "querystring" one is
-// present: OpenAPI 3.2 forbids using both, and the querystring parameter describes the whole string.
+// dropQueryAlongsideQuerystring removes every "query" parameter, whatever declared it, when a
+// "querystring" parameter is present: OpenAPI 3.2 forbids using both, and the querystring
+// parameter describes the whole string, so it is the one kept.
 func dropQueryAlongsideQuerystring(extras []fiber.RouteParameter) []fiber.RouteParameter {
 	hasQuerystring := false
 	for i := range extras {
@@ -54,13 +56,7 @@ func dropQueryAlongsideQuerystring(extras []fiber.RouteParameter) []fiber.RouteP
 	if !hasQuerystring {
 		return extras
 	}
-	filtered := make([]fiber.RouteParameter, 0, len(extras))
-	for i := range extras {
-		if extras[i].In.Normalize() != fiber.ParamInQuery {
-			filtered = append(filtered, extras[i])
-		}
-	}
-	return filtered
+	return filterParams(extras, func(in fiber.ParamLocation) bool { return in == fiber.ParamInQuery })
 }
 
 func mergeRouteParameters(params []parameter, index map[parameterKey]int, extras []fiber.RouteParameter, reg *schemaRegistry) []parameter {
