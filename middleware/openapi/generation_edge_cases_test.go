@@ -409,3 +409,28 @@ func Test_OpenAPI_VersionHelpers(t *testing.T) {
 	require.False(t, versionAtLeast("3.0.3", versionOpenAPI31))
 	require.False(t, versionAtLeast("garbage", versionOpenAPI30))
 }
+
+func Test_OpenAPI_ConfigRejectsInvalidServersAndPaths(t *testing.T) {
+	t.Parallel()
+
+	for name, cfg := range map[string]Config{
+		"variable without default": {Servers: []Server{{URL: "https://{r}.x", Variables: map[string]ServerVariable{"r": {}}}}},
+		"default outside enum":     {Servers: []Server{{URL: "https://{r}.x", Variables: map[string]ServerVariable{"r": {Default: "eu", Enum: []string{"us"}}}}}},
+		"undeclared placeholder":   {Servers: []Server{{URL: "https://{region}.x"}}},
+		"path equals ui path":      {Path: "/docs", UIPath: "/docs/"},
+		"path equals ui path case": {Path: "/Docs", UIPath: "/docs"},
+	} {
+		require.Panics(t, func() { _ = configDefault(cfg) }, name)
+	}
+
+	require.NotPanics(t, func() {
+		_ = configDefault(Config{
+			Servers: []Server{
+				{URL: ""},
+				{URL: "https://{r}.x/{v}", Variables: map[string]ServerVariable{"r": {Default: "eu", Enum: []string{"eu", "us"}}, "v": {Default: "v1"}}},
+				{URL: "https://plain.example.com"},
+			},
+			Path: "/a.json", UIPath: "/a",
+		})
+	})
+}

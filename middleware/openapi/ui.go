@@ -9,7 +9,38 @@ import (
 	"github.com/gofiber/utils/v2"
 )
 
+// swaggerInitScript starts Swagger UI from the settings the page carries in data attributes. It is the same
+// for every page, so a strict Content-Security-Policy can allow it by hash instead of by 'unsafe-inline'.
+const swaggerInitScript = `
+      window.addEventListener("load", function () {
+        const root = document.getElementById("swagger-ui");
+        const options = JSON.parse(root.dataset.swaggerOptions);
+
+        const presets = [SwaggerUIBundle.presets.apis];
+        const config = {
+          url: root.dataset.url,
+          dom_id: "#swagger-ui",
+        };
+        if (typeof SwaggerUIStandalonePreset !== "undefined") {
+          presets.push(SwaggerUIStandalonePreset);
+          config.layout = "StandaloneLayout";
+        }
+        config.presets = presets;
+
+        window.ui = SwaggerUIBundle({
+          ...config,
+          ...options,
+        });
+      });
+    `
+
+// UIScriptCSPSource is the Content-Security-Policy source expression for the page's one inline script,
+// for a policy such as script-src 'self' https://unpkg.com followed by this value.
+const UIScriptCSPSource = "'sha256-aqKS8L4uzWkkwwtrhn5Atl/nhTF9eruvTkjOhUZArQs='"
+
 type swaggerUITemplateData struct {
+	InitScript htemplate.JS
+
 	SwaggerOptionsJSON         string
 	Title                      string
 	OpenAPIURL                 string
@@ -36,7 +67,7 @@ var swaggerUITemplate = htemplate.Must(htemplate.New("swagger-ui").Parse(`<!doct
     />
   </head>
   <body>
-    <div id="swagger-ui" data-swagger-options='{{ .SwaggerOptionsJSON }}'></div>
+    <div id="swagger-ui" data-url="{{ .OpenAPIURL }}" data-swagger-options='{{ .SwaggerOptionsJSON }}'></div>
 
     <script
       src="{{ .SwaggerBundleURL }}"{{ if .SwaggerBundleIntegrity }}
@@ -48,27 +79,7 @@ var swaggerUITemplate = htemplate.Must(htemplate.New("swagger-ui").Parse(`<!doct
       integrity="{{ .SwaggerStandalonePresetIntegrity }}"
       crossorigin="anonymous"{{ end }}
     ></script>{{ end }}
-    <script>
-      window.addEventListener("load", function () {
-        const options = JSON.parse(document.getElementById("swagger-ui").dataset.swaggerOptions);
-
-        const presets = [SwaggerUIBundle.presets.apis];
-        const config = {
-          url: "{{ .OpenAPIURL }}",
-          dom_id: "#swagger-ui",
-        };
-        if (typeof SwaggerUIStandalonePreset !== "undefined") {
-          presets.push(SwaggerUIStandalonePreset);
-          config.layout = "StandaloneLayout";
-        }
-        config.presets = presets;
-
-        window.ui = SwaggerUIBundle({
-          ...config,
-          ...options,
-        });
-      });
-    </script>
+    <script>{{ .InitScript }}</script>
   </body>
 </html>
 `))
@@ -87,6 +98,7 @@ func buildSwaggerUIPage(openAPIURL string, cfg *Config, encode utils.JSONMarshal
 	}
 
 	data := swaggerUITemplateData{
+		InitScript:                 htemplate.JS(swaggerInitScript), //nolint:gosec // G203: a constant script, not input
 		Title:                      cfg.Title,
 		OpenAPIURL:                 openAPIURL,
 		SwaggerCSSURL:              cfg.SwaggerCSSURL,

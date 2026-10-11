@@ -193,7 +193,7 @@ func typeSchema(t reflect.Type, visited map[reflect.Type]bool, reg *schemaRegist
 	case reflect.Struct:
 		// Named types go under components when a registry is present.
 		if reg != nil && t.Name() != "" {
-			return reg.ref(t, visited)
+			return reg.ref(t)
 		}
 		return structSchema(t, visited, reg)
 	case reflect.Interface:
@@ -289,6 +289,7 @@ func structSchema(t reflect.Type, visited map[reflect.Type]bool, reg *schemaRegi
 				applyOpenAPITag(&field, fieldSchema)
 				// A validate rule outranks omitempty.
 				mustValidate := applyValidateTag(&field, fieldSchema)
+				fieldSchema = reg.withRefSiblings(fieldSchema)
 
 				if _, ok := candidates[name]; !ok {
 					order = append(order, name)
@@ -363,7 +364,7 @@ func structExample(properties map[string]any, reg *schemaRegistry) map[string]an
 			example[name] = value
 			continue
 		}
-		ref, isRef := prop[schemaKeyRef].(string)
+		ref, isRef := referenceOf(prop)
 		if !isRef || reg == nil {
 			continue
 		}
@@ -374,6 +375,20 @@ func structExample(properties map[string]any, reg *schemaRegistry) map[string]an
 		}
 	}
 	return example
+}
+
+// referenceOf returns the "$ref" a property schema points at, directly or, in 3.0, through a one-entry "allOf".
+func referenceOf(schema map[string]any) (string, bool) {
+	if target, ok := schema[schemaKeyRef].(string); ok {
+		return target, true
+	}
+	if all, ok := schema["allOf"].([]any); ok && len(all) == 1 {
+		if entry, isMap := all[0].(map[string]any); isMap {
+			target, found := entry[schemaKeyRef].(string)
+			return target, found
+		}
+	}
+	return "", false
 }
 
 type jsonTagInfo struct {

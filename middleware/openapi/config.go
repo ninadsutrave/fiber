@@ -2,9 +2,11 @@ package openapi
 
 import (
 	"slices"
+	"strings"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/internal/deepcopy"
+	"github.com/gofiber/utils/v2"
 )
 
 const (
@@ -365,5 +367,44 @@ func configDefault(config ...Config) Config {
 	if !supportedVersion(cfg.OpenAPIVersion) {
 		cfg.OpenAPIVersion = ConfigDefault.OpenAPIVersion
 	}
+	validateServers(cfg.Servers)
+	if utils.EqualFold(utils.TrimRight(normalizedPath(cfg.Path), '/'), utils.TrimRight(normalizedPath(cfg.UIPath), '/')) {
+		panic("openapi: Path and UIPath must differ: " + cfg.Path)
+	}
 	return cfg
+}
+
+// validateServers panics on a server the specification would reject: a variable without a default, a
+// default outside its enum, or a "{name}" in the URL that no variable declares. A server with an empty
+// URL is not checked, as it is skipped when the document is built.
+func validateServers(servers []Server) {
+	for i := range servers {
+		server := &servers[i]
+		if server.URL == "" {
+			continue
+		}
+		for name, variable := range server.Variables {
+			if variable.Default == "" {
+				panic("openapi: Servers[" + utils.FormatInt(int64(i)) + "] variable " + name + " needs a Default")
+			}
+			if len(variable.Enum) > 0 && !slices.Contains(variable.Enum, variable.Default) {
+				panic("openapi: Servers[" + utils.FormatInt(int64(i)) + "] variable " + name + ": Default " + variable.Default + " is not in Enum")
+			}
+		}
+		rest := server.URL
+		for {
+			_, after, found := strings.Cut(rest, "{")
+			if !found {
+				break
+			}
+			name, tail, closed := strings.Cut(after, "}")
+			if !closed {
+				break
+			}
+			if _, declared := server.Variables[name]; !declared {
+				panic("openapi: Servers[" + utils.FormatInt(int64(i)) + "] URL uses {" + name + "} but declares no such variable")
+			}
+			rest = tail
+		}
+	}
 }

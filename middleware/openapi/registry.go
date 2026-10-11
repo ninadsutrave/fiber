@@ -18,6 +18,8 @@ type schemaRegistry struct {
 	// taken maps a component name to the type that owns it. A name a user's
 	// Components already uses is taken by a nil type, so it is never reused.
 	taken map[string]reflect.Type
+	// wrapRefSiblings is set for OpenAPI 3.0, where a Reference Object may hold nothing but "$ref".
+	wrapRefSiblings bool
 }
 
 // newSchemaRegistry starts a registry that never reuses names in Components.schemas.
@@ -26,6 +28,8 @@ func newSchemaRegistry(cfg *Config) *schemaRegistry {
 		schemas: make(map[string]map[string]any),
 		names:   make(map[reflect.Type]string),
 		taken:   make(map[string]reflect.Type),
+
+		wrapRefSiblings: !versionAtLeast(cfg.OpenAPIVersion, versionOpenAPI31),
 	}
 	for name := range stringKeyedEntries(cfg.Components["schemas"]) {
 		reg.taken[name] = nil
@@ -49,14 +53,16 @@ func (reg *schemaRegistry) resolve(schema any) map[string]any {
 }
 
 // ref registers a named struct type and returns a reference to it. The name is
-// claimed before the schema is built so self-referencing types do not recurse.
-func (reg *schemaRegistry) ref(t reflect.Type, visited map[reflect.Type]bool) map[string]any {
+// claimed before the schema is built so self-referencing types do not recurse. The component is
+// built with an empty visited set: it must not depend on the types of whichever schema reached it
+// first, or the same type would document differently depending on registration order.
+func (reg *schemaRegistry) ref(t reflect.Type) map[string]any {
 	name, ok := reg.names[t]
 	if !ok {
 		name = reg.claimName(t)
 		reg.names[t] = name
-		reg.schemas[name] = nil
-		reg.schemas[name] = structSchema(t, visited, reg)
+		reg.schemas[name] = nil // reserve the entry so a recursive reference finds the name taken
+		reg.schemas[name] = structSchema(t, nil, reg)
 	}
 	return map[string]any{schemaKeyRef: componentsSchemasRef + name}
 }
@@ -104,4 +110,21 @@ func (reg *schemaRegistry) componentSchemas() map[string]any {
 		out[name] = schema
 	}
 	return out
+}
+
+// withRefSiblings returns schema ready to carry sibling keys next to a "$ref". OpenAPI 3.1 allows them; in
+// 3.0 a Reference Object holds only "$ref", so the reference moves into "allOf" and the siblings stay beside it.
+func (reg *schemaRegistry) withRefSiblings(schema map[string]any) map[string]any {
+	target, isRef := schema[schemaKeyRef].(string)
+	if reg == nil || !reg.wrapRefSiblings || !isRef || len(schema) < 2 {
+		return schema
+	}
+	wrapped := make(map[string]any, len(schema))
+	for key, value := range schema {
+		if key != schemaKeyRef {
+			wrapped[key] = value
+		}
+	}
+	wrapped["allOf"] = []any{map[string]any{schemaKeyRef: target}}
+	return wrapped
 }

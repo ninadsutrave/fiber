@@ -6,9 +6,11 @@ import (
 	"github.com/gofiber/fiber/v3/internal/deepcopy"
 )
 
-// copyRoute clones a route without its group, so the clone does not inherit the
-// source app's group name. A mount placeholder keeps its target app in group.app;
-// cloning it would serve the mounted handlers on every host under a domain mount.
+// copyRoute clones a route without its group, so the clone belongs to whichever app it is placed in
+// and Name() does not prefix it with the source app's group name. A caller that wants the group
+// assigns it back, as ensureAutoHeadRoutesLocked does. The omission is load-bearing for a mount
+// placeholder, which keeps its target app in group.app: cloning it would serve the mounted handlers
+// on every host under a domain mount, so domainRouter.cloneRoutesForDomain expands the mount instead.
 func (app *App) copyRoute(route *Route) *Route {
 	copied := new(Route)
 	app.copyRouteInto(copied, route)

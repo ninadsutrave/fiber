@@ -77,9 +77,31 @@ func handlerSummary(handlers []fiber.Handler) string {
 	return summaryFromFuncName(fn.Name())
 }
 
+// stripTypeArguments removes every bracketed type-argument list from a runtime function name, wherever it
+// sits: "main.S[...].List-fm" and "main.(*S[...]).Get-fm" name the methods List and Get of a generic type.
+func stripTypeArguments(name string) string {
+	if !strings.Contains(name, "[") {
+		return name
+	}
+	var b strings.Builder
+	b.Grow(len(name))
+	depth := 0
+	for i := 0; i < len(name); i++ {
+		switch c := name[i]; {
+		case c == '[':
+			depth++
+		case c == ']' && depth > 0:
+			depth--
+		case depth == 0:
+			_ = b.WriteByte(c) //nolint:errcheck // strings.Builder.WriteByte never returns an error
+		}
+	}
+	return b.String()
+}
+
 // summaryFromFuncName turns a runtime function name into a sentence, stripping package, receiver, "-fm" and type lists. Anonymous functions yield "".
 func summaryFromFuncName(name string) string {
-	name, _, _ = utils.CutByte(name, '[')
+	name = stripTypeArguments(name)
 	name = strings.TrimSuffix(name, "-fm")
 	if _, after, found := utils.LastCutByte(name, '.'); found {
 		name = after

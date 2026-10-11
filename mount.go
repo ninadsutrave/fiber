@@ -73,6 +73,14 @@ type domainMountedApp struct {
 	declared []CustomConstraint
 }
 
+// mountedRoute is a mounted app's route, copied under that app's lock, with what re-parsing it needs.
+type mountedRoute struct {
+	clone        *Route
+	owner        *App
+	constraints  []CustomConstraint
+	skipAutoHead bool
+}
+
 // newDomainMount records a mount of mounted at path, normalized and parsed
 // with the routing rules of the app it is being mounted on, so the lookups
 // recognize it the same way the router recognizes its routes.
@@ -191,7 +199,7 @@ func (app *App) mount(prefix string, subApp *App) Router {
 
 	// register mounted group
 	mountGroup := &Group{Prefix: prefix, app: subApp}
-	app.register([]string{methodUse}, prefix, mountGroup, "")
+	app.register([]string{methodUse}, prefix, mountGroup, allHosts)
 
 	// Execute onMount hooks
 	if err := subApp.hooks.executeOnMountHooks(app); err != nil {
@@ -224,7 +232,7 @@ func (grp *Group) mount(prefix string, subApp *App) Router {
 	// register mounted group
 	mountGroup := &Group{Prefix: groupPath, app: subApp}
 	// Move the cursor onto the mount, as App.Use does, so chained helpers do not hit the previous route.
-	atomic.StoreUint64(&grp.lastRegID, grp.app.register([]string{methodUse}, groupPath, mountGroup, ""))
+	atomic.StoreUint64(&grp.lastRegID, grp.app.register([]string{methodUse}, groupPath, mountGroup, allHosts))
 
 	// Execute onMount hooks
 	if err := subApp.hooks.executeOnMountHooks(grp.app); err != nil {
@@ -798,13 +806,6 @@ func (app *App) processSubAppsRoutes() {
 
 			// Snapshot under the sub-app's lock so re-parsing never holds two apps' locks.
 			// Read by method: the sub-app may configure its own RequestMethods.
-			type sourceRoute struct {
-				clone        *Route
-				owner        *App
-				constraints  []CustomConstraint
-				skipAutoHead bool
-			}
-
 			subApp.mutex.Lock()
 			subAppRoutes := subApp.routesForMethod(app.method(m))
 			subConstraints := slices.Clone(subApp.customConstraints)
@@ -813,7 +814,7 @@ func (app *App) processSubAppsRoutes() {
 			// registered for the methods it serves, and a HEAD route
 			// synthesized from the GET one would run without it.
 			skipsAutoHead := subApp.config.DisableHeadAutoRegister || subApp.methodInt(MethodHead) < 0
-			sources := make([]sourceRoute, len(subAppRoutes))
+			sources := make([]mountedRoute, len(subAppRoutes))
 			for j, subAppRoute := range subAppRoutes {
 				clone := app.copyRoute(subAppRoute)
 
@@ -823,7 +824,7 @@ func (app *App) processSubAppsRoutes() {
 					owner = subApp
 				}
 
-				sources[j] = sourceRoute{
+				sources[j] = mountedRoute{
 					clone:        clone,
 					owner:        owner,
 					constraints:  slices.Clone(subApp.routeConstraintsFor(subAppRoute)),

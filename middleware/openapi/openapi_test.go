@@ -1,6 +1,8 @@
 package openapi
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -618,8 +620,8 @@ func Test_OpenAPI_SwaggerUI_DefaultTemplate(t *testing.T) {
 	require.Contains(t, bodyText, "<title>Fiber API - Swagger UI</title>")
 	require.Contains(t, bodyText, `href="https://unpkg.com/swagger-ui-dist@5.32.6/swagger-ui.css"`)
 	require.Contains(t, bodyText, `src="https://unpkg.com/swagger-ui-dist@5.32.6/swagger-ui-bundle.js"`)
-	require.Contains(t, bodyText, `url: "\/openapi.json"`)
-	require.Contains(t, bodyText, `id="swagger-ui" data-swagger-options='{}'`)
+	require.Contains(t, bodyText, `data-url="/openapi.json"`)
+	require.Contains(t, bodyText, `data-swagger-options='{}'`)
 	require.NotContains(t, bodyText, "persistAuthorization")
 }
 
@@ -653,8 +655,8 @@ func Test_OpenAPI_SwaggerUI_ConfigurableAssetsAndOptions(t *testing.T) {
 	require.Contains(t, bodyText, "<title>Custom API - Swagger UI</title>")
 	require.Contains(t, bodyText, `href="https://cdn.example.com/swagger-ui.css"`)
 	require.Contains(t, bodyText, `src="https://cdn.example.com/swagger-ui-bundle.js"`)
-	require.Contains(t, bodyText, `url: "\/spec.json"`)
-	require.Contains(t, bodyText, `id="swagger-ui" data-swagger-options='{&#34;`)
+	require.Contains(t, bodyText, `data-url="/spec.json"`)
+	require.Contains(t, bodyText, `data-swagger-options='{&#34;`)
 	require.Contains(t, bodyText, `&#34;docExpansion&#34;:&#34;list&#34;`)
 	require.Contains(t, bodyText, `&#34;deepLinking&#34;:true`)
 	require.Contains(t, bodyText, `&#34;persistAuthorization&#34;:true`)
@@ -674,7 +676,7 @@ func Test_OpenAPI_SwaggerUI_GroupPath(t *testing.T) {
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.Contains(t, string(body), `url: "\/api\/openapi.json"`)
+	require.Contains(t, string(body), `data-url="/api/openapi.json"`)
 }
 
 func Test_OpenAPI_Version310(t *testing.T) {
@@ -2215,7 +2217,7 @@ func Test_OpenAPI_ExactRouteRegistration(t *testing.T) {
 	require.Equal(t, fiber.StatusOK, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.Contains(t, string(body), `url: "\/openapi.json"`)
+	require.Contains(t, string(body), `data-url="/openapi.json"`)
 }
 
 func Test_OpenAPI_SpecReflectsRouteRemoval(t *testing.T) {
@@ -2259,7 +2261,7 @@ func Test_OpenAPI_MultiPrefixUIPages(t *testing.T) {
 		require.Equal(t, fiber.StatusOK, resp.StatusCode)
 		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
-		require.Contains(t, string(body), `url: "\/`+prefix[1:]+`\/openapi.json"`, prefix)
+		require.Contains(t, string(body), `data-url="/`+prefix[1:]+`/openapi.json"`, prefix)
 	}
 }
 
@@ -2313,7 +2315,7 @@ func Test_OpenAPI_MountedSubAppExactRoute(t *testing.T) {
 	require.Equal(t, fiber.StatusOK, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.Contains(t, string(body), `url: "\/api\/openapi.json"`)
+	require.Contains(t, string(body), `data-url="/api/openapi.json"`)
 }
 
 func Test_OpenAPI_ParameterizedMountPrefix(t *testing.T) {
@@ -2343,7 +2345,7 @@ func Test_OpenAPI_ParameterizedMountPrefix(t *testing.T) {
 	require.Equal(t, fiber.StatusOK, resp.StatusCode)
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.Contains(t, string(body), `url: "\/acme\/openapi.json"`)
+	require.Contains(t, string(body), `data-url="/acme/openapi.json"`)
 }
 
 func Test_OpenAPI_MountedParamPrefixPathParams(t *testing.T) {
@@ -3714,4 +3716,89 @@ func Test_Config_SwaggerAssetsShareOnePinnedVersion(t *testing.T) {
 	for _, hash := range []string{ConfigDefault.SwaggerCSSIntegrity, ConfigDefault.SwaggerBundleIntegrity, ConfigDefault.SwaggerStandalonePresetIntegrity} {
 		require.True(t, strings.HasPrefix(hash, "sha384-"), hash)
 	}
+}
+
+func Test_OpenAPI_SwaggerUI_InlineScriptIsConstantAndHashed(t *testing.T) {
+	t.Parallel()
+
+	sum := sha256.Sum256([]byte(swaggerInitScript))
+	want := "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+	require.Equal(t, want, UIScriptCSPSource, "UIScriptCSPSource must be the hash of swaggerInitScript; update it with the script")
+
+	page := func(path string) string {
+		app := fiber.New()
+		app.Get("/users", func(c fiber.Ctx) error { return c.SendStatus(fiber.StatusOK) })
+		app.Use(New(Config{Path: path, UIPath: "/docs", SwaggerOptions: map[string]any{"deepLinking": true}}))
+		resp, err := app.Test(httptest.NewRequest(fiber.MethodGet, "/docs", http.NoBody))
+		require.NoError(t, err)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return string(body)
+	}
+
+	// Whatever the settings, the one inline script is the same, so one hash covers every page.
+	for _, path := range []string{"/openapi.json", "/very/different/spec.json?x=1&y=2"} {
+		body := page(path)
+		require.Equal(t, 1, strings.Count(body, "<script>"), path)
+		require.Contains(t, body, "<script>"+swaggerInitScript+"</script>", path)
+	}
+}
+
+func Test_OpenAPI_ConditionalRequests(t *testing.T) {
+	t.Parallel()
+
+	app := fiber.New()
+	app.Get("/users", func(c fiber.Ctx) error { return c.SendStatus(fiber.StatusOK) })
+	app.Use(New())
+
+	get := func(path string, headers ...string) *http.Response {
+		req := httptest.NewRequest(fiber.MethodGet, path, http.NoBody)
+		for i := 0; i+1 < len(headers); i += 2 {
+			req.Header.Set(headers[i], headers[i+1])
+		}
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		return resp
+	}
+
+	for _, path := range []string{"/openapi.json", "/swagger"} {
+		first := get(path)
+		require.Equal(t, fiber.StatusOK, first.StatusCode, path)
+		etag := first.Header.Get(fiber.HeaderETag)
+		require.NotEmpty(t, etag, path)
+		require.Equal(t, "no-cache", first.Header.Get(fiber.HeaderCacheControl), path)
+
+		notModified := get(path, fiber.HeaderIfNoneMatch, etag)
+		require.Equal(t, fiber.StatusNotModified, notModified.StatusCode, path)
+		body, err := io.ReadAll(notModified.Body)
+		require.NoError(t, err)
+		require.Empty(t, body, path)
+
+		other := get(path, fiber.HeaderIfNoneMatch, `"something-else"`)
+		require.Equal(t, fiber.StatusOK, other.StatusCode, path)
+		require.Equal(t, etag, other.Header.Get(fiber.HeaderETag), path)
+
+		// An end-to-end reload always gets the body.
+		reload := get(path, fiber.HeaderIfNoneMatch, etag, fiber.HeaderCacheControl, "no-cache")
+		require.Equal(t, fiber.StatusOK, reload.StatusCode, path)
+	}
+}
+
+func Test_OpenAPI_ETagChangesWithTheRoutes(t *testing.T) {
+	t.Parallel()
+
+	app := fiber.New()
+	app.Get("/users", func(c fiber.Ctx) error { return c.SendStatus(fiber.StatusOK) })
+	app.Use(New())
+
+	tag := func() string {
+		resp, err := app.Test(httptest.NewRequest(fiber.MethodGet, "/openapi.json", http.NoBody))
+		require.NoError(t, err)
+		return resp.Header.Get(fiber.HeaderETag)
+	}
+
+	before := tag()
+	require.Equal(t, before, tag(), "an unchanged document keeps its tag")
+	app.Get("/more", func(c fiber.Ctx) error { return c.SendStatus(fiber.StatusOK) })
+	require.NotEqual(t, before, tag())
 }

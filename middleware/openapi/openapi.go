@@ -1,6 +1,8 @@
 package openapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -23,9 +25,33 @@ const maxCachedEntries = 32
 
 // appCache holds one app's artifacts; UI pages embed the spec URL so they are keyed per target.
 type appCache struct {
-	uiPages  map[string][]byte
-	specData []byte
+	uiPages  map[string]cachedBody
+	specBody cachedBody
 	specRev  uint64
+}
+
+// cachedBody is a generated response body and its entity tag.
+type cachedBody struct {
+	etag string
+	data []byte
+}
+
+// newCachedBody tags data with a strong entity tag derived from its content.
+func newCachedBody(data []byte) cachedBody {
+	sum := sha256.Sum256(data)
+	return cachedBody{data: data, etag: `"` + hex.EncodeToString(sum[:16]) + `"`}
+}
+
+// send writes the body with its entity tag and answers a matching If-None-Match with 304. The
+// document changes whenever routes do, so clients always revalidate (Cache-Control: no-cache).
+func (b cachedBody) send(c fiber.Ctx, contentType string) error {
+	c.Set(fiber.HeaderContentType, contentType)
+	c.Set(fiber.HeaderETag, b.etag)
+	c.Set(fiber.HeaderCacheControl, "no-cache")
+	if c.Fresh() {
+		return c.SendStatus(fiber.StatusNotModified)
+	}
+	return c.Status(fiber.StatusOK).Send(b.data)
 }
 
 // New creates a new middleware handler that serves the generated OpenAPI specification.
@@ -42,7 +68,7 @@ func New(config ...Config) fiber.Handler {
 	cacheFor := func(app *fiber.App) *appCache {
 		cache, ok := caches[app]
 		if !ok {
-			cache = &appCache{uiPages: make(map[string][]byte)}
+			cache = &appCache{uiPages: make(map[string]cachedBody)}
 			if len(caches) >= maxCachedEntries {
 				for evicted := range caches {
 					delete(caches, evicted)
@@ -55,43 +81,44 @@ func New(config ...Config) fiber.Handler {
 	}
 
 	// specBytes regenerates when the route revision moved. Deferred unlock so a panic cannot wedge the cache.
-	specBytes := func(app *fiber.App) ([]byte, error) {
+	specBytes := func(app *fiber.App) (cachedBody, error) {
 		cacheMu.Lock()
 		defer cacheMu.Unlock()
 
 		cache := cacheFor(app)
 		rev := app.RoutesRevision()
-		if cache.specData == nil || cache.specRev != rev {
+		if cache.specBody.data == nil || cache.specRev != rev {
 			// GetRoutes copies under the router lock, so generation never races registration.
 			appCfg := app.Config()
 			spec := generateSpec(app.GetRoutes(false), &cfg, specEnv{validator: appCfg.StructValidator, equal: segmentEqualFor(&appCfg), strict: appCfg.StrictRouting})
 			data, err := appCfg.JSONEncoder(spec)
 			if err != nil {
-				return nil, fmt.Errorf("openapi: marshal spec: %w", err)
+				return cachedBody{}, fmt.Errorf("openapi: marshal spec: %w", err)
 			}
-			cache.specData, cache.specRev = data, rev
+			cache.specBody, cache.specRev = newCachedBody(data), rev
 		}
-		return cache.specData, nil
+		return cache.specBody, nil
 	}
 
-	uiBytes := func(app *fiber.App, targetPath string) ([]byte, error) {
+	uiBytes := func(app *fiber.App, targetPath string) (cachedBody, error) {
 		cacheMu.Lock()
 		defer cacheMu.Unlock()
 
 		cache := cacheFor(app)
-		if data, ok := cache.uiPages[targetPath]; ok {
-			return data, nil
+		if body, ok := cache.uiPages[targetPath]; ok {
+			return body, nil
 		}
 		data, err := buildSwaggerUIPage(targetPath, &cfg, app.Config().JSONEncoder)
 		if err != nil {
-			return nil, fmt.Errorf("openapi: build swagger ui page: %w", err)
+			return cachedBody{}, fmt.Errorf("openapi: build swagger ui page: %w", err)
 		}
+		body := newCachedBody(data)
 		if len(cache.uiPages) >= maxCachedEntries {
 			// Keys derive from the request path (attacker-controlled); drop all rather than let junk pin the cache.
 			clear(cache.uiPages)
 		}
-		cache.uiPages[targetPath] = data
-		return data, nil
+		cache.uiPages[targetPath] = body
+		return body, nil
 	}
 
 	specPath := utils.TrimRight(normalizedPath(cfg.Path), '/')
@@ -133,21 +160,17 @@ func New(config ...Config) fiber.Handler {
 
 		switch {
 		case targets.specOK && equal(request, targets.spec):
-			data, err := specBytes(c.App())
+			body, err := specBytes(c.App())
 			if err != nil {
 				return err
 			}
-
-			c.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
-			return c.Status(fiber.StatusOK).Send(data)
+			return body.send(c, fiber.MIMEApplicationJSONCharsetUTF8)
 		case targets.uiOK && equal(request, targets.ui):
-			data, err := uiBytes(c.App(), targets.spec)
+			body, err := uiBytes(c.App(), targets.spec)
 			if err != nil {
 				return err
 			}
-
-			c.Set(fiber.HeaderContentType, fiber.MIMETextHTMLCharsetUTF8)
-			return c.Status(fiber.StatusOK).Send(data)
+			return body.send(c, fiber.MIMETextHTMLCharsetUTF8)
 		default:
 			return c.Next()
 		}

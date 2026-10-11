@@ -1419,14 +1419,15 @@ func (app *App) removeMatchedLocked(methods []string, indexes []int, matched map
 // unindexRouteLocked drops a removed entry from its registrations so later helpers
 // are no-ops; the caller must hold app.mutex.
 func (app *App) unindexRouteLocked(route *Route) {
-	for id, entries := range app.regEntries {
-		entries = slices.DeleteFunc(entries, func(entry *Route) bool { return entry == route })
+	for _, id := range app.entryRegs[route] {
+		entries := slices.DeleteFunc(app.regEntries[id], func(entry *Route) bool { return entry == route })
 		if len(entries) == 0 {
 			delete(app.regEntries, id)
 			continue
 		}
 		app.regEntries[id] = entries
 	}
+	delete(app.entryRegs, route)
 }
 
 // pruneAutoHeadRouteLocked removes an automatically generated HEAD route so a
@@ -1548,7 +1549,18 @@ func (app *App) register(methods []string, pathRaw string, group *Group, domain 
 }
 
 func (app *App) addRoute(method string, route *Route) {
+	if hookRoute := app.insertRoute(method, route); hookRoute != nil {
+		if err := app.hooks.executeOnRouteHooks(hookRoute); err != nil {
+			panic(err)
+		}
+	}
+}
+
+// insertRoute adds the route under the router lock, released even if the insertion panics, and
+// returns the snapshot the OnRoute hooks receive, or nil when there is none to run.
+func (app *App) insertRoute(method string, route *Route) *Route {
 	app.mutex.Lock()
+	defer app.mutex.Unlock()
 
 	route.captureGroupLocked()
 
@@ -1587,23 +1599,18 @@ func (app *App) addRoute(method string, route *Route) {
 		app.latestRegID = route.id
 	}
 
-	// Snapshot under the lock; hooks fire unlocked so they may call locking methods.
-	var hookRoute *Route
+	// Snapshot under the lock; the hooks run after it is released so they may call locking methods.
 	if !route.mount && len(app.hooks.onRoute) > 0 {
-		hookRoute = app.copyRoute(liveRoute)
+		return app.copyRoute(liveRoute)
 	}
-	app.mutex.Unlock()
-	if hookRoute != nil {
-		if err := app.hooks.executeOnRouteHooks(hookRoute); err != nil {
-			panic(err)
-		}
-	}
+	return nil
 }
 
 // indexRouteLocked records route as an entry of registration id; the caller must hold app.mutex.
 func (app *App) indexRouteLocked(id uint64, route *Route) {
 	if app.regEntries == nil {
 		app.regEntries = make(map[uint64][]*Route)
+		app.entryRegs = make(map[*Route][]uint64)
 	}
 	entries := app.regEntries[id]
 	// A duplicate entry would apply an appending helper twice.
@@ -1611,6 +1618,7 @@ func (app *App) indexRouteLocked(id uint64, route *Route) {
 		return
 	}
 	app.regEntries[id] = append(entries, route)
+	app.entryRegs[route] = append(app.entryRegs[route], id)
 }
 
 // ensureAutoHeadRoutes creates the missing auto-HEAD routes; the caller fires their hooks unlocked.
@@ -1665,6 +1673,8 @@ func (app *App) ensureAutoHeadRoutesLocked() []*Route {
 	if app.autoHeadRouteID == currentRouteID && app.autoHeadStackLen == len(app.stack[headIndex]) {
 		return nil
 	}
+	// Recorded on the normal exits only: a scan aborted by a panic must not be marked complete, or every
+	// HEAD request that needed a companion would stay at 405 for the lifetime of the process.
 	recordScan := func() {
 		app.autoHeadRouteID = routeIDs.Load()
 		app.autoHeadStackLen = len(app.stack[headIndex])
@@ -1755,14 +1765,20 @@ func (app *App) fireOnRouteHooks(routes []*Route) {
 // Latest benchmark results showed a degradation from 82.79 ns/op to 94.48 ns/op and can be found in:
 // https://github.com/gofiber/fiber/issues/2769#issuecomment-2227385283
 func (app *App) RebuildTree() *App {
+	app.fireOnRouteHooks(app.rebuildTreeLocked())
+	return app
+}
+
+// rebuildTreeLocked rebuilds the tree under the router lock, released even if that panics, and
+// returns the automatic HEAD routes created, whose OnRoute hooks run after the lock is released.
+func (app *App) rebuildTreeLocked() []*Route {
 	app.mutex.Lock()
+	defer app.mutex.Unlock()
+
 	// Routes registered since startup get their automatic HEAD companions here.
 	twins := app.ensureAutoHeadRoutesLocked()
 	app.buildTree()
-	app.mutex.Unlock()
-
-	app.fireOnRouteHooks(twins)
-	return app
+	return twins
 }
 
 // routeIndexInTree returns the position of route in another method's tree

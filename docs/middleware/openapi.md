@@ -168,6 +168,18 @@ In an air-gapped network, behind a proxy, or under a strict `Content-Security-Po
 those requests fail and the UI renders as a blank page. Vendor the assets and point
 all three fields at your own URLs.
 
+The page has one inline script. It is the same for every page, because the spec URL and
+`SwaggerOptions` travel in data attributes, so a strict policy can allow it by hash
+instead of `'unsafe-inline'`:
+
+```go
+c.Set(fiber.HeaderContentSecurityPolicy,
+    "script-src 'self' https://unpkg.com "+openapi.UIScriptCSPSource)
+```
+
+`UIScriptCSPSource` is the `'sha256-…'` source expression for that script. The stylesheet
+needs `style-src` for its URL as well.
+
 :::caution Override all three
 An empty string means "use the default", not "disable". Overriding only
 `SwaggerCSSURL` and `SwaggerBundleURL` leaves `SwaggerStandalonePresetURL`
@@ -741,6 +753,17 @@ route's media type.
 - A route's `Consumes`/`Produces` are inferred from the first media type passed
   to `RequestBody*` and to a `200` `Response*`, but only when `Consumes()` or
   `Produces()` did not set one explicitly.
+- The spec and the UI page are sent with an `ETag` and `Cache-Control: no-cache`, and a
+  matching `If-None-Match` gets `304 Not Modified`. The tag changes whenever the document
+  does, so clients revalidate on every load and refetch only after a route changed.
+- `New` panics on a `Servers` entry the specification would reject: a variable without a
+  `Default`, a `Default` that is not in its `Enum`, or a `{name}` in the URL that no
+  variable declares. A server with an empty `URL` is skipped. It also panics when `Path`
+  and `UIPath` are the same path, as the UI would be unreachable.
+- Under OpenAPI 3.0 a `$ref` may not have sibling keys, so a struct field that references a
+  named type and also carries a description, `readOnly` or `deprecated` is written as
+  `{"allOf": [{"$ref": …}], "description": …}`; 3.1 and 3.2 keep the keys beside the `$ref`.
+  A component schema is built the same way whichever route is documented first.
 - Each operation gets a unique `operationId`: routes documented with `Name` use
   that name, with anything but letters, digits, `_`, `-` and `.` replaced by `_`
   (`list all users` → `list_all_users`, `2fa.verify` → `op_2fa.verify`) because code

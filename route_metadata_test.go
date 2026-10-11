@@ -244,10 +244,13 @@ func Test_Shutdown_WithInflightGetRoutes(t *testing.T) {
 	}()
 
 	<-started
+	shuttingDown := make(chan struct{})
+	app.Hooks().OnPreShutdown(func() error { close(shuttingDown); return nil })
 	done := make(chan error, 1)
 	go func() { done <- app.Shutdown() }()
 
-	time.Sleep(100 * time.Millisecond)
+	// Shutdown is now running while the handler is still in flight.
+	<-shuttingDown
 	close(proceed)
 
 	select {
@@ -571,13 +574,15 @@ func Test_Hooks_OutsideRouterLock(t *testing.T) {
 		app.Get("/a", testHandlerOK)
 		app.Hooks().OnPreShutdown(func() error { _ = app.GetRoutes(); return nil })
 
+		listening := make(chan struct{})
+		app.Hooks().OnListen(func(ListenData) error { close(listening); return nil })
 		ln := fasthttputil.NewInmemoryListener()
 		go func() {
 			if err := app.Listener(ln, ListenConfig{DisableStartupMessage: true}); err != nil {
 				panic(err)
 			}
 		}()
-		time.Sleep(100 * time.Millisecond)
+		<-listening
 		runBounded(t, "OnPreShutdown", func() { require.NoError(t, app.Shutdown()) })
 	})
 }
@@ -1883,4 +1888,47 @@ func Test_ParamLocation_Normalize(t *testing.T) {
 	require.Equal(t, ParamInQuery, ParamLocation(" Query ").Normalize())
 	require.Equal(t, ParamInHeader, ParamLocation("HEADER").Normalize())
 	require.Equal(t, ParamLocation(""), ParamLocation("  ").Normalize())
+}
+
+func Test_RemoveRoute_ClearsBothRegistrationIndexes(t *testing.T) {
+	t.Parallel()
+
+	app := New()
+	// Two registrations of one path merge into one entry that is indexed under both ids.
+	app.Get("/a", testHandlerOK).Name("a")
+	app.Get("/a", testHandlerOK)
+	app.Get("/b", testHandlerOK).Name("b")
+
+	app.RemoveRoute("/a", MethodGet)
+	app.mutex.Lock()
+	remaining := len(app.regEntries)
+	reverse := len(app.entryRegs)
+	app.mutex.Unlock()
+	require.Equal(t, 1, remaining, "only /b stays indexed")
+	require.Equal(t, 1, reverse)
+	require.Empty(t, app.GetRoute("a").Path)
+	require.Equal(t, "/b", app.GetRoute("b").Path)
+
+	app.RemoveRouteByName("b", MethodGet)
+	app.mutex.Lock()
+	require.Empty(t, app.regEntries)
+	require.Empty(t, app.entryRegs)
+	app.mutex.Unlock()
+}
+
+func Test_LockIsFreeAfterStartupAndRebuild(t *testing.T) {
+	t.Parallel()
+
+	app := New()
+	sub := New()
+	sub.Get("/s", testHandlerOK)
+	app.Use("/m", sub)
+	app.Get("/x", testHandlerOK)
+
+	_, err := app.Test(httptest.NewRequest(MethodGet, "/m/s", http.NoBody))
+	require.NoError(t, err)
+	app.RebuildTree()
+
+	require.True(t, app.mutex.TryLock(), "startup and rebuild must release the router lock")
+	app.mutex.Unlock()
 }

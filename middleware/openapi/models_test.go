@@ -379,3 +379,64 @@ func Test_resolveHeaderSchemas(t *testing.T) {
 	// The caller's map still holds the Go value.
 	require.Equal(t, modelAddress{}, headers["model"].(map[string]any)["schema"]) //nolint:forcetypeassert,errcheck // test fixture shape
 }
+
+type orderNode struct {
+	Name string      `json:"name"`
+	Kids []orderNode `json:"kids"`
+}
+
+type orderPage[T any] struct {
+	Items []T `json:"items"`
+}
+
+func Test_OpenAPI_ComponentsDoNotDependOnRegistrationOrder(t *testing.T) {
+	t.Parallel()
+
+	build := func(first, second any) map[string]any {
+		app := fiber.New()
+		app.Post("/a", listUsers).Accepts(first)
+		app.Post("/b", listUsers).Accepts(second)
+		schemas := requireMap(t, requireMap(t, modelSpec(t, app)["components"])["schemas"])
+		return requireMap(t, schemas["orderNode"])
+	}
+
+	nodeFirst := build(orderNode{}, orderPage[orderNode]{})
+	pageFirst := build(orderPage[orderNode]{}, orderNode{})
+	require.Equal(t, nodeFirst, pageFirst)
+
+	kids := requireMap(t, requireMap(t, pageFirst["properties"])["kids"])
+	require.Equal(t, "array", kids["type"])
+	require.Equal(t, ref("orderNode"), kids["items"])
+}
+
+type refSiblingInner struct {
+	ID int `json:"id" openapi:"example:7"`
+}
+
+type refSiblingOuter struct {
+	Inner refSiblingInner `json:"inner" openapi:"description:the inner,readOnly"`
+}
+
+func Test_OpenAPI_RefSiblingsAreWrappedBefore31(t *testing.T) {
+	t.Parallel()
+
+	inner := func(version string) map[string]any {
+		app := fiber.New()
+		app.Post("/x", listUsers).Accepts(refSiblingOuter{})
+		schemas := requireMap(t, requireMap(t, modelSpec(t, app, Config{OpenAPIVersion: version})["components"])["schemas"])
+		return requireMap(t, requireMap(t, schemas["refSiblingOuter"])["properties"])["inner"].(map[string]any) //nolint:errcheck,forcetypeassert // map built by the generator
+	}
+
+	for _, version := range []string{"3.0.0", "3.0.3"} {
+		got := inner(version)
+		require.NotContains(t, got, "$ref", version)
+		require.Equal(t, []any{map[string]any{"$ref": "#/components/schemas/refSiblingInner"}}, got["allOf"], version)
+		require.Equal(t, "the inner", got["description"], version)
+		require.Equal(t, true, got["readOnly"], version)
+	}
+	for _, version := range []string{"3.1.0", "3.2.0"} {
+		got := inner(version)
+		require.Equal(t, "#/components/schemas/refSiblingInner", got["$ref"], version)
+		require.Equal(t, "the inner", got["description"], version)
+	}
+}

@@ -61,6 +61,9 @@ func (l ParamLocation) Normalize() ParamLocation {
 	return ParamLocation(utilsstrings.ToLower(utils.TrimSpace(string(l))))
 }
 
+// allHosts is the domain of a route registered outside a domain router: it answers on every host.
+const allHosts = ""
+
 const defaultResponseKey = "default"
 
 // smallIndexMax is the name count up to which scanning a slice beats hashing.
@@ -117,6 +120,9 @@ type App struct {
 	hooks *Hooks
 	// regEntries maps a registration id to its live stack entries. Guarded by mutex.
 	regEntries map[uint64][]*Route
+	// entryRegs is the reverse of regEntries: the registration ids an entry is indexed under, so
+	// removing it touches only those. Guarded by mutex.
+	entryRegs map[*Route][]uint64
 	// newCtxFunc
 	newCtxFunc func(app *App) CustomCtx
 	// TLS handler
@@ -1143,7 +1149,7 @@ func (app *App) Use(args ...any) Router {
 			continue
 		}
 
-		app.register([]string{methodUse}, prefix, nil, "", handlers...)
+		app.register([]string{methodUse}, prefix, nil, allHosts, handlers...)
 	}
 
 	return app
@@ -1212,7 +1218,7 @@ func (app *App) Query(path string, handler any, handlers ...any) Router {
 // The provided handlers are executed in order, starting with `handler` and then the variadic `handlers`.
 func (app *App) Add(methods []string, path string, handler any, handlers ...any) Router {
 	converted := collectHandlers("add", append([]any{handler}, handlers...)...)
-	app.register(methods, path, nil, "", converted...)
+	app.register(methods, path, nil, allHosts, converted...)
 
 	return app
 }
@@ -1231,7 +1237,7 @@ func (app *App) Group(prefix string, handlers ...any) Router {
 	if len(handlers) > 0 {
 		converted := collectHandlers("group", handlers...)
 		// The middleware belongs to the group so chained helpers reach it.
-		atomic.StoreUint64(&grp.lastRegID, app.register([]string{methodUse}, prefix, grp, "", converted...))
+		atomic.StoreUint64(&grp.lastRegID, app.register([]string{methodUse}, prefix, grp, allHosts, converted...))
 	}
 	if err := app.hooks.executeOnGroupHooks(*grp); err != nil {
 		panic(err)
@@ -1826,7 +1832,20 @@ func (app *App) serverErrorHandler(fctx *fasthttp.RequestCtx, err error) {
 
 // startupProcess Is the method which executes all the necessary processes just before the start of the server.
 func (app *App) startupProcess() {
+	twins, subTwins := app.prepareStartup()
+
+	// Hooks fire after the lock is released so they may call locking app methods, sub-apps' included.
+	app.fireOnRouteHooks(twins)
+	for _, sub := range subTwins {
+		sub.app.fireOnRouteHooks(sub.twins)
+	}
+}
+
+// prepareStartup does the work of startupProcess under the router lock, released even if that
+// panics, and returns the automatic HEAD routes created for the app and for each mounted app.
+func (app *App) prepareStartup() ([]*Route, []subAppTwins) {
 	app.mutex.Lock()
+	defer app.mutex.Unlock()
 
 	app.hookConnState()
 	// Collect every mounted app first, nested ones included, so all get their automatic HEAD routes.
@@ -1846,12 +1865,7 @@ func (app *App) startupProcess() {
 	// build route tree stack
 	app.buildTree()
 
-	// Fire hooks after unlocking so they may call locking app methods, sub-apps' included.
-	app.mutex.Unlock()
-	app.fireOnRouteHooks(twins)
-	for _, sub := range subTwins {
-		sub.app.fireOnRouteHooks(sub.twins)
-	}
+	return twins, subTwins
 }
 
 // subAppTwins pairs a mounted app with the HEAD routes created for it at startup.

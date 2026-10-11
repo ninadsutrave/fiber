@@ -228,7 +228,7 @@ func (grp *Group) Use(args ...any) Router {
 			continue
 		}
 
-		atomic.StoreUint64(&grp.lastRegID, grp.app.register([]string{methodUse}, getGroupPath(grp.Prefix, prefix), grp, "", handlers...))
+		atomic.StoreUint64(&grp.lastRegID, grp.app.register([]string{methodUse}, getGroupPath(grp.Prefix, prefix), grp, allHosts, handlers...))
 	}
 
 	if !grp.hasAnyRoute {
@@ -301,7 +301,7 @@ func (grp *Group) Query(path string, handler any, handlers ...any) Router {
 // The provided handlers are executed in order, starting with `handler` and then the variadic `handlers`.
 func (grp *Group) Add(methods []string, path string, handler any, handlers ...any) Router {
 	converted := collectHandlers("group", append([]any{handler}, handlers...)...)
-	atomic.StoreUint64(&grp.lastRegID, grp.app.register(methods, getGroupPath(grp.Prefix, path), grp, "", converted...))
+	atomic.StoreUint64(&grp.lastRegID, grp.app.register(methods, getGroupPath(grp.Prefix, path), grp, allHosts, converted...))
 	if !grp.hasAnyRoute {
 		grp.hasAnyRoute = true
 	}
@@ -327,7 +327,7 @@ func (grp *Group) Group(prefix string, handlers ...any) Router {
 	if len(handlers) > 0 {
 		converted := collectHandlers("group", handlers...)
 		// Record on the sub-group; the parent's doc helpers must not retarget this Use route.
-		atomic.StoreUint64(&newGrp.lastRegID, grp.app.register([]string{methodUse}, prefix, grp, "", converted...))
+		atomic.StoreUint64(&newGrp.lastRegID, grp.app.register([]string{methodUse}, prefix, grp, allHosts, converted...))
 	}
 	if err := grp.app.hooks.executeOnGroupHooks(*newGrp); err != nil {
 		panic(err)
